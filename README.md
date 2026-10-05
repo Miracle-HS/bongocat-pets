@@ -1,6 +1,6 @@
 # BongoCat 点击数工具
 
-给 Steam 桌面宠物 [BongoCat](https://store.steampowered.com/app/3419430/Bongo_Cat/) 的单机辅助脚本：修改点击数、加速宝箱冷却、自动开箱。游戏无联网对战与反作弊，数据走 Steam 本地统计，改动安全。
+给 Steam 桌面宠物 [BongoCat](https://store.steampowered.com/app/3419430/Bongo_Cat/) 的单机辅助脚本：修改点击数、加速宝箱冷却、自动开箱。数据走 Steam 本地统计，改动安全。
 
 ## 环境要求
 
