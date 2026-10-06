@@ -9,4 +9,5 @@ config.json
 *.exe
 build/
 dist/
+.claude/
 *.spec

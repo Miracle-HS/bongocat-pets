@@ -21,6 +21,8 @@ OFF_READY = 0x0D      # ChestIsReady
 OFF_OPENING = 0x0F    # _openingChest
 
 PROC = "BongoCat.exe"
+APP_TITLE = "BongoCat 点击数工具"
+INSTANCE_MUTEX = r"Local\BongoCatPetsGUI"
 MAXR = 64 * 1024 * 1024
 
 REG_PATH = r"Software\Irox Games\BongoCat"
@@ -240,6 +242,7 @@ class App(object):
         self.opened = {0: int(self.cfg.get("opened_normal", 0) or 0),
                        1: int(self.cfg.get("opened_emote", 0) or 0)}
         self.scanning = False
+        self.retry = 0            # 定位失败后的自动重试次数
         self.patch_state = None
         self._build()
         self._refresh_opened()
@@ -249,11 +252,11 @@ class App(object):
 
     def _build(self):
         r = self.root
-        r.title("BongoCat 点击数工具")
+        r.title(APP_TITLE)
         r.configure(background=BG)
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
-        r.geometry("%dx%d" % (min(660, sw - 40), min(830, sh - 60)))
-        r.minsize(620, 560)
+        r.geometry("%dx%d" % (min(800, sw - 40), min(920, sh - 80)))
+        r.minsize(600, min(440, sh - 80))
 
         st = ttk.Style(r)
         st.theme_use("clam")
@@ -332,6 +335,59 @@ class App(object):
                      lightcolor=BTN, darkcolor=BTN)
         st.map("Vertical.TScrollbar", background=[("active", "#41475f")])
 
+        # ================= 可滚动内容区 =================
+        # 所有内容塞进 Canvas 里的 Frame: 内容超高时用鼠标滚轮上下滚动, 不常驻滚动条。
+        # 宽度永远跟随窗口; 高度 = max(内容自然高度, 窗口高度) -> 窗口够高时日志框自动撑满。
+        self.canvas = tk.Canvas(r, bg=BG, highlightthickness=0, bd=0,
+                                yscrollincrement=18)   # units=像素, 滚动手感更细
+        self.canvas.pack(fill="both", expand=True)
+        self.inner = ttk.Frame(self.canvas)
+        self._win = self.canvas.create_window((0, 0), window=self.inner,
+                                              anchor="nw")
+
+        def _inner_cfg(_e=None):
+            # 内容高度变了 -> 更新可滚动区域
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+        def _canvas_cfg(e):
+            if not self._win:
+                return
+            self.canvas.itemconfigure(self._win, width=e.width)
+            # 注意用 reqheight (自然高), 不要用 bbox 高度, 否则会「棘轮式」只增不减
+            self.canvas.itemconfigure(
+                self._win, height=max(self.inner.winfo_reqheight(), e.height))
+
+        self.inner.bind("<Configure>", _inner_cfg)
+        self.canvas.bind("<Configure>", _canvas_cfg)
+
+        # ---- 鼠标滚轮 ----
+        def _on_wheel(e):
+            w = e.widget
+            d = getattr(e, "delta", 0)
+            if not d:
+                return
+            step = -int(d / 120) * 3      # Windows delta = ±120, 一格滚 3 个单位
+            if isinstance(w, tk.Text):
+                return                     # 日志框自己滚, 别两边一起滚
+            if isinstance(w, ttk.Scrollbar):
+                self.txt.yview_scroll(step, "units")   # 悬在日志滚动条上 -> 滚日志
+                return
+            if not self.canvas.winfo_ismapped():
+                return                     # messagebox / filedialog 上不滚主界面
+            self.canvas.yview_scroll(step, "units")
+            return "break"
+
+        r.bind_all("<MouseWheel>", _on_wheel)
+
+        def _on_close():
+            try:
+                r.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+            r.destroy()
+
+        r.protocol("WM_DELETE_WINDOW", _on_close)
+
         # ---------------- 标题 + 图标 ----------------
         self._logo = self._icon = None
         try:
@@ -347,7 +403,7 @@ class App(object):
         except Exception:
             self._logo = self._icon = None
 
-        head = ttk.Frame(r)
+        head = ttk.Frame(self.inner)
         head.pack(fill="x", padx=14, pady=(12, 0))
         if self._logo is not None:
             ttk.Label(head, image=self._logo, style="Logo.TLabel").pack(
@@ -356,15 +412,13 @@ class App(object):
         else:
             title = "🐾  BongoCat 点击数工具"
         ttk.Label(head, text=title, style="Head.TLabel").pack(side="left")
-        ttk.Label(head, text="定位 · 改数值 · 宝箱管理", style="Sub.TLabel").pack(
-            side="left", padx=(10, 0), pady=(7, 0))
         ttk.Label(head, text="v%s" % version.__version__, style="Sub.TLabel").pack(
             side="right", pady=(7, 0))
         ttk.Label(head, text="适配游戏 %s" % " / ".join(version.ADAPTED),
                   style="Sub.TLabel").pack(side="right", padx=(0, 8), pady=(7, 0))
 
         # ============ 连接 · 定位 · 数值 ============
-        f1 = ttk.LabelFrame(r, text=" ①  连接 · 定位 · 数值 ",
+        f1 = ttk.LabelFrame(self.inner, text=" ①  连接 · 定位 · 数值 ",
                             style="Card.TLabelframe")
         f1.pack(fill="x", padx=12, pady=(10, 4))
         c1 = ttk.Frame(f1, style="Card.TFrame")
@@ -402,15 +456,23 @@ class App(object):
             ttk.Label(g, text=k, style="Key.TLabel").grid(
                 row=i, column=1, sticky="w", padx=(8, 0))
             ttk.Label(g, textvariable=var, style="Num.TLabel").grid(
-                row=i, column=2, sticky="e", pady=2)
-        g.columnconfigure(2, weight=1)
-        ttk.Label(g, text="可用点击数", style="Muted.TLabel").grid(
-            row=0, column=3, sticky="e", padx=(24, 0))
-        ttk.Label(g, textvariable=self.v_cur, style="Big.TLabel").grid(
-            row=1, column=3, rowspan=2, sticky="e", padx=(24, 0))
+                row=i, column=2, sticky="w", padx=(12, 0), pady=2)
+        g.columnconfigure(3, weight=1)      # 右侧留白列, 数值左对齐, 互不挤压
+
+        ttk.Separator(c1).pack(fill="x", pady=(10, 8))
+
+        gc = ttk.Frame(c1, style="Card.TFrame")
+        gc.pack(fill="x")
+        ttk.Label(gc, text="可用点击数", style="Muted.TLabel").grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(gc, text="BongoTap - BongoMinus", style="Key.TLabel").grid(
+            row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(gc, textvariable=self.v_cur, style="Big.TLabel").grid(
+            row=0, column=2, sticky="e", padx=(16, 0))
+        gc.columnconfigure(1, weight=1)     # 伸展的是说明列, 大数字贴右边缘
 
         # ============  操作面板  ============
-        f2 = ttk.LabelFrame(r, text=" ②  操作面板 ",
+        f2 = ttk.LabelFrame(self.inner, text=" ②  操作面板 ",
                             style="Card.TLabelframe")
         f2.pack(fill="x", padx=12, pady=4)
         c2 = ttk.Frame(f2, style="Card.TFrame")
@@ -420,22 +482,28 @@ class App(object):
         ttk.Label(c2, text="▎修改点击数", style="Sec.TLabel").pack(anchor="w")
         a = ttk.Frame(c2, style="Card.TFrame")
         a.pack(fill="x", pady=(4, 0))
-        ttk.Label(a, text="把「累计花费」设为:").pack(side="left")
-        self.e_val = ttk.Entry(a, width=14, font=("Consolas", 10))
-        self.e_val.pack(side="left", padx=8)
+        a.columnconfigure(2, weight=1)        # 末尾留白列吸收多余宽度, 前两列保持靠左
+        ttk.Label(a, text="把「累计花费」设为:", style="Muted.TLabel").grid(
+            row=0, column=0, sticky="w")
+        # 输入框与「应用」放进同一格: 两者永远紧邻, 不会被伸展列推到远处
+        av = ttk.Frame(a, style="Card.TFrame")
+        av.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.e_val = ttk.Entry(av, width=14, font=("Consolas", 10))
+        self.e_val.pack(side="left")
         self.e_val.insert(0, "0")
-        self.bt_apply = ttk.Button(a, text="应用", command=self.do_apply,
+        self.bt_apply = ttk.Button(av, text="应用", command=self.do_apply,
                                    state="disabled")
-        self.bt_apply.pack(side="left")
+        self.bt_apply.pack(side="left", padx=(8, 0))
         self.bt_zero = ttk.Button(a, text="一键清零 (拿回全部点击数)",
                                   style="Accent.TButton",
                                   command=lambda: self.do_apply(0),
                                   state="disabled")
-        self.bt_zero.pack(side="left", padx=(10, 0))
+        # 长按钮独占一行通栏: 无论窗口多窄都不会挤到上一行
+        self.bt_zero.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(7, 0))
         self.cb_hold = ttk.Checkbutton(
             c2, text="锁定累计花费 (开箱永不扣)",
             variable=self.hold_on, command=self.on_hold, state="disabled")
-        self.cb_hold.pack(anchor="w", pady=(4, 0))
+        self.cb_hold.pack(anchor="w", pady=(6, 0))
 
         ttk.Separator(c2).pack(fill="x", pady=10)
 
@@ -446,72 +514,104 @@ class App(object):
         sg.pack(fill="x", pady=(4, 0))
         self.v_shop_n = tk.StringVar(value="—")
         self.v_shop_e = tk.StringVar(value="—")
-        ttk.Label(sg, text="普通宝箱  剩余/上限", style="Muted.TLabel").grid(
-            row=0, column=0, sticky="w", pady=1)
-        ttk.Label(sg, textvariable=self.v_shop_n, style="Num.TLabel").grid(
-            row=0, column=1, sticky="e", pady=1)
-        ttk.Label(sg, text="表情宝箱  剩余/上限", style="Muted.TLabel").grid(
-            row=1, column=0, sticky="w", pady=1)
-        ttk.Label(sg, textvariable=self.v_shop_e, style="Num.TLabel").grid(
-            row=1, column=1, sticky="e", pady=1)
-        sg.columnconfigure(1, weight=1)
+        for i, (cap, var) in enumerate((("普通宝箱  剩余/上限", self.v_shop_n),
+                                        ("表情宝箱  剩余/上限", self.v_shop_e))):
+            ttk.Label(sg, text=cap, style="Muted.TLabel").grid(
+                row=i, column=0, sticky="w", pady=1)
+            ttk.Label(sg, textvariable=var, style="Num.TLabel").grid(
+                row=i, column=1, sticky="w", padx=(12, 0), pady=1)
+        # 尾部文字可能很长("等 Steam 发令牌 (重试 N 次)"), 靠右侧留白列吸收
+        sg.columnconfigure(2, weight=1)
         sa = ttk.Frame(c2, style="Card.TFrame")
         sa.pack(fill="x", pady=(6, 0))
-        ttk.Label(sa, text="冷却上限(秒):").pack(side="left")
-        self.e_cd = ttk.Entry(sa, width=10, font=("Consolas", 10))
-        self.e_cd.pack(side="left", padx=8)
+        sa.columnconfigure(2, weight=1)
+        ttk.Label(sa, text="冷却上限(秒):", style="Muted.TLabel").grid(
+            row=0, column=0, sticky="w")
+        # 输入框与「应用」同格, 始终紧邻
+        cd = ttk.Frame(sa, style="Card.TFrame")
+        cd.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.e_cd = ttk.Entry(cd, width=10, font=("Consolas", 10))
+        self.e_cd.pack(side="left")
         self.e_cd.insert(0, "5")
-        self.bt_cd = ttk.Button(sa, text="应用", command=self.do_cooldown,
+        self.bt_cd = ttk.Button(cd, text="应用", command=self.do_cooldown,
                                 state="disabled")
-        self.bt_cd.pack(side="left")
+        self.bt_cd.pack(side="left", padx=(8, 0))
         self.bt_now = ttk.Button(sa, text="立刻上架", style="Accent.TButton",
                                  command=self.do_ready, state="disabled")
-        self.bt_now.pack(side="left", padx=(10, 0))
+        self.bt_now.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(7, 0))
         self.cb_fast = ttk.Checkbutton(
             c2, text="保持随时可开 (倒计时一超过上限就压回去)",
             variable=self.fast_on, state="disabled")
-        self.cb_fast.pack(anchor="w", pady=(4, 0))
+        self.cb_fast.pack(anchor="w", pady=(6, 0))
 
         ttk.Separator(c2).pack(fill="x", pady=10)
 
         # ---- 2c 自动开箱  ----
-        ttk.Label(c2, text="▎自动开箱  ·  DLL 补丁版, 不用鼠标",
-                  style="Sec.TLabel").pack(anchor="w")
-        rr = ttk.Frame(c2, style="Card.TFrame")
-        rr.pack(fill="x", pady=(4, 0))
-        ttk.Label(rr, text="补丁状态", width=8, style="Muted.TLabel").pack(side="left")
+        ttk.Label(c2, text="▎自动开箱", style="Sec.TLabel").pack(anchor="w")
+        rc = ttk.Frame(c2, style="Card.TFrame")
+        rc.pack(fill="x", pady=(4, 0))
+        # col0 = 标签列(固定) / col1 = 内容列(伸展) / col2 = 操作按钮列(固定)
+        # 操作列宽度锁死: 任何一行文字变长只挤内容列, 按钮永远不会被顶走
+        rc.columnconfigure(0, minsize=76)
+        rc.columnconfigure(1, weight=1)
+        rc.columnconfigure(2, minsize=100)   # 宽度 = 「选择游戏目录」自然宽
+
+        def _cap(row, text):
+            ttk.Label(rc, text=text, style="Muted.TLabel", width=8,
+                      anchor="w").grid(row=row, column=0, sticky="nw",
+                                        pady=(4, 0))
+
+        # 补丁状态 —— 去掉固定 width, 整条内容列独占, 永不裁字
+        _cap(0, "补丁状态")
         self.v_patch = tk.StringVar(value="检测中…")
-        self.lb_patch = ttk.Label(rr, textvariable=self.v_patch,
-                                  font=("Consolas", 10), width=26)
-        self.lb_patch.pack(side="left")
-        ttk.Button(rr, text="打补丁", command=self.do_patch).pack(side="left")
-        ttk.Button(rr, text="还原", style="Warn.TButton",
-                   command=self.do_unpatch).pack(side="left", padx=(8, 0))
-        rv = ttk.Frame(c2, style="Card.TFrame")
-        rv.pack(fill="x", pady=(6, 0))
-        ttk.Label(rv, text="游戏版本", width=8, style="Muted.TLabel").pack(side="left")
+        self.lb_patch = ttk.Label(rc, textvariable=self.v_patch,
+                                  font=("Consolas", 10), anchor="w",
+                                  justify="left", wraplength=520)
+        self.lb_patch.grid(row=0, column=1, columnspan=2, sticky="ew")
+
+        # 补丁按钮 —— 两者相邻靠左, 不被伸展列拆散
+        pb = ttk.Frame(rc, style="Card.TFrame")
+        pb.grid(row=1, column=1, sticky="w", pady=(7, 0))
+        self.bt_patch = ttk.Button(pb, text="打补丁", command=self.do_patch)
+        self.bt_patch.pack(side="left")
+        self.bt_unpatch = ttk.Button(pb, text="还原", style="Warn.TButton",
+                                     command=self.do_unpatch)
+        self.bt_unpatch.pack(side="left", padx=(8, 0))
+
+        # 游戏版本 —— 值独占一行, 不再和按钮抢空间
+        _cap(2, "游戏版本")
         self.v_game = tk.StringVar(value="检测中…")
-        ttk.Label(rv, textvariable=self.v_game, style="Key.TLabel").pack(side="left")
-        ttk.Button(rv, text="选择游戏目录",
-                   command=self.do_choose_dir).pack(side="right")
-        rr = ttk.Frame(c2, style="Card.TFrame")
-        rr.pack(fill="x", pady=(6, 0))
-        ttk.Label(rr, text="已开箱", width=8, style="Muted.TLabel").pack(side="left")
+        ttk.Label(rc, textvariable=self.v_game, style="Key.TLabel",
+                  anchor="w").grid(row=2, column=1, columnspan=2,
+                                    sticky="ew", pady=(4, 0))
+
+        # 选择目录 —— 默认不显示, 仅当自动定位找不到游戏时才由 refresh_patch_state 放出
+        self.bt_dir = ttk.Button(rc, text="选择游戏目录",
+                                 command=self.do_choose_dir)
+
+        # 已开箱 + 清零
+        _cap(4, "已开箱")
         self.v_opened = tk.StringVar(value="—")
-        ttk.Label(rr, textvariable=self.v_opened, style="Ok.TLabel").pack(side="left")
-        ttk.Button(rr, text="清零", style="Warn.TButton",
-                   command=self.do_reset_count).pack(side="right")
-        rr = ttk.Frame(c2, style="Card.TFrame")
-        rr.pack(fill="x", pady=(4, 0))
+        ttk.Label(rc, textvariable=self.v_opened, style="Ok.TLabel",
+                  anchor="w").grid(row=4, column=1, sticky="w", pady=(8, 0))
+        self.bt_reset = ttk.Button(rc, text="清零", style="Warn.TButton",
+                                   command=self.do_reset_count)
+        self.bt_reset.grid(row=4, column=2, sticky="e", pady=(4, 0))
+
+        # 暂停复选框 —— 长文本独占一整行通栏
         self.cb_auto = ttk.Checkbutton(
-            rr, text="暂停自动开箱 (勾上 = 压住倒计时, 游戏就不会自动买)",
+            rc, text="暂停自动开箱 (勾上 = 压住倒计时, 游戏就不会自动买)",
             variable=self.pause_on, command=self.on_pause, state="disabled")
-        self.cb_auto.pack(side="left")
+        self.cb_auto.grid(row=5, column=0, columnspan=3, sticky="w", pady=(9, 0))
+
+        # 状态文字 —— 挪到下一行右对齐, 不与长复选框争同一行
         self.v_auto = tk.StringVar(value="")
-        ttk.Label(rr, textvariable=self.v_auto, style="Muted.TLabel").pack(side="right")
+        ttk.Label(rc, textvariable=self.v_auto, style="Muted.TLabel",
+                  anchor="e").grid(row=6, column=1, columnspan=2,
+                                   sticky="e", pady=(2, 0))
 
         # ============ 日志 ============
-        f3 = ttk.LabelFrame(r, text=" 日志 ", style="Card.TLabelframe")
+        f3 = ttk.LabelFrame(self.inner, text=" 日志 ", style="Card.TLabelframe")
         f3.pack(fill="both", expand=True, padx=12, pady=(4, 12))
         wrap = ttk.Frame(f3, style="Card.TFrame")
         wrap.pack(fill="both", expand=True, padx=10, pady=(6, 10))
@@ -528,6 +628,20 @@ class App(object):
 
         # 标题栏跟随深色主题 (打包时窗口句柄就绪后生效)
         r.after(10, lambda: _dark_titlebar(r))
+        # 首屏按内容实际高度开窗, 超出屏幕就截断(靠滚轮)
+        r.after(80, self._fit_height)
+
+    def _fit_height(self):
+        """一次性: 把窗口高度撑到刚好装下内容, 但不超过屏幕, 也不小于 minsize。"""
+        try:
+            r = self.root
+            r.update_idletasks()
+            need = self.inner.winfo_reqheight() + 34      # 34 ≈ Windows 标题栏
+            sh = r.winfo_screenheight()
+            want = max(min(need, sh - 80), 440)
+            r.geometry("%dx%d" % (max(r.winfo_width(), 800), want))
+        except tk.TclError:
+            pass
 
     def log(self, s):
         self.txt.configure(state="normal")
@@ -575,6 +689,8 @@ class App(object):
             self.v_patch.set("未找到游戏")
             self.lb_patch.config(foreground=AMBER)
             self.v_game.set("—")
+            # 只有自动定位失败时才给出手动指定目录的入口
+            self.bt_dir.grid(row=3, column=2, sticky="e", pady=(6, 0))
             self.log("未找到 BongoCat 游戏目录。请点「选择游戏目录」指定, 或确认游戏已安装")
             return None
         try:
@@ -585,7 +701,9 @@ class App(object):
             self.v_patch.set("无法读取: %s" % str(e)[:22])
             self.lb_patch.config(foreground=RED)
             self.v_game.set("—")
+            self.bt_dir.grid_remove()
             return None
+        self.bt_dir.grid_remove()
         self.patch_state = state
         self.v_patch.set(state + ("  (偏移 0x%X)" % off))
         self.lb_patch.config(foreground=GREEN if state.startswith("已打补丁") else TEXT)
@@ -634,24 +752,19 @@ class App(object):
                 "提示", "没能读取游戏 DLL。\n若上面显示「未找到游戏」, "
                         "请点「选择游戏目录」指定游戏安装位置。")
             return
-        running = patch_dll.game_running()
         try:
             off, old, new, _ = patch_dll.compute()
-            try:
-                ok = patch_dll.write_bytes(off, new)
-            except PermissionError:
-                messagebox.showwarning(
-                    "需要先关闭游戏",
-                    "这次 DLL 确实被进程锁住了。\n\n"
-                    "请关闭 BongoCat 后再点「打补丁」, 然后重新启动游戏。")
-                return
-            if ok:
-                tail = "  重启 BongoCat 后生效" if running else ""
-                self.log("补丁已写入 (偏移 0x%X), 宝箱就绪将自动购买%s" % (off, tail))
-            self.refresh_patch_state()
         except Exception as e:
-            self.log("打补丁失败: %s" % e)
+            self.log("计算补丁位置失败: %s" % e)
             messagebox.showerror("失败", str(e))
+            return
+
+        def _write():
+            if not patch_dll.write_bytes(off, new):
+                raise RuntimeError("写入补丁失败 (DLL 可能被占用)")
+            self.q.put(("rlog", "补丁已写入 (偏移 0x%X), 宝箱就绪将自动购买" % off))
+
+        self._apply_with_restart("打补丁", _write)
 
     def do_unpatch(self):
         import patch_dll
@@ -664,18 +777,195 @@ class App(object):
         if not b:
             messagebox.showwarning("提示", "没找到备份文件")
             return
-        try:
-            import shutil, os
+        name = os.path.basename(b)
+
+        def _restore():
+            import shutil
+            shutil.copy2(b, dll)
+            self.q.put(("rlog", "已从 %s 还原" % name))
+
+        self._apply_with_restart("还原原版", _restore)
+
+    def _drop_conn(self):
+        """作废当前内存连接 (进程可能已被结束), 界面退回未连接态"""
+        self.core.mem = None
+        self.core.addr = None
+        self.core.pid = None
+        self.core.shops = []
+        self.core.hwnd = None
+        self.hold_target = None
+        self._enable(False)
+        self._enable_shop(False)
+        self.lb_addr.config(text="基址: —")
+
+    def _game_exe(self):
+        """从已定位的 DLL 反推 BongoCat.exe 路径"""
+        dll = gameinfo.find_dll()
+        if not dll:
+            return None
+        cand = os.path.join(gameinfo.game_root_from_dll(dll), gameinfo.PROC_NAME)
+        return cand if os.path.isfile(cand) else None
+
+    def _apply_with_restart(self, why, work):
+        """改 DLL 的统一流程: 关闭游戏 -> 写盘 -> 重新启动 -> 主线程重连
+
+        必须先关游戏: DLL 被进程加载着时覆写会抛 WinError 1224
+        (「请求的操作无法在使用用户映射区域打开的文件上执行」),
+        那个码不是 PermissionError, 所以不能靠 except PermissionError 兜。
+
+        work 是写盘回调, 只在游戏已停、进程外执行。
+        """
+        self._drop_conn()
+        self.bt_patch.config(state="disabled")
+        self.bt_unpatch.config(state="disabled")
+        self.lb_proc.config(text="●  正在重启游戏…", foreground=MUTED)
+        threading.Thread(target=self._apply_worker, args=(why, work),
+                         daemon=True).start()
+
+    def _game_procs(self, root):
+        """列出 exe 位于 root 目录下的进程 -> [(pid, name), ...]
+
+        只按 exe 路径筛, 所以别的 Unity 游戏的 UnityCrashHandler64 不会被算进来。
+        """
+        import gamemem
+        root = os.path.normpath(root).lower()
+        out = []
+        for pid, _name in gamemem.list_processes():
             try:
-                shutil.copy2(b, dll)
-            except PermissionError:
-                messagebox.showwarning("需要先关闭游戏", "DLL 被进程锁住了, 请关闭 BongoCat 后再还原。")
+                p = gameinfo._exe_path_of(pid)
+            except Exception:
+                continue
+            if p and os.path.dirname(os.path.normpath(p)).lower() == root:
+                out.append((pid, os.path.basename(p)))
+        return out
+
+    def _kill_helpers(self, root):
+        """结束游戏目录里的残留进程 (UnityCrashHandler64 等), 它们映射着游戏 DLL"""
+        import subprocess
+        for pid, name in self._game_procs(root):
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                               capture_output=True, timeout=10)
+                self.q.put(("rlog", "已结束残留进程 %s (PID=%d)" % (name, pid)))
+            except Exception:
+                pass
+
+    def _apply_worker(self, why, work):
+        """后台线程: 停游戏 -> work() 写盘 -> 拉起游戏 -> 等它起来 -> 通知主线程重连
+
+        走队列而不是直接碰界面, 因为 tkinter 只能在主线程操作。
+        """
+        import subprocess, time
+        import gamemem
+
+        exe = self._game_exe()
+        if not exe:
+            self.q.put(("rlog", "找不到 BongoCat.exe, 无法自动重启"))
+            self.q.put(("rdone", False))
+            return
+
+        pid = gamemem.find_pid(PROC)
+
+        # 游戏开着就先关掉。按镜像名杀而不是 /PID —— 可能开了多个实例,
+        # /PID 只杀一棵进程树, 漏掉的那些照样占着 DLL。
+        if pid:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/IM", PROC],
+                               capture_output=True, timeout=15)
+            except Exception as e:
+                self.q.put(("rlog", "结束游戏进程失败: %s" % e))
+                self.q.put(("rdone", False))
                 return
-            self.log("已从 %s 还原" % os.path.basename(b))
-            self.refresh_patch_state()
+            # 只杀游戏目录内的进程: UnityCrashHandler64.exe 会映射游戏的 managed
+            # DLL, 不清掉它写盘必然撞 WinError 1224。按路径筛, 免得误杀别的
+            # Unity 游戏的崩溃处理器。
+            self._kill_helpers(os.path.dirname(exe))
+            # taskkill 是异步的, 发出去不等于进程已经没了。这里必须先等它
+            # 真正退出, 否则下面的写盘重试会把「正在退出」误判成「游戏复活」。
+            t0 = time.time()
+            while time.time() - t0 < 15 and self._game_procs(os.path.dirname(exe)):
+                time.sleep(0.3)
+            if self._game_procs(os.path.dirname(exe)):
+                self.q.put(("rlog", "游戏没能退出, 取消%s" % why))
+                self.q.put(("rdone", False))
+                return
+
+        # 写盘重试: 进程退出后它的内存映射不会立刻释放, 这段时间里覆写 DLL
+        # 会撞 WinError 1224 (或 32)。等一小会儿再试就能写进去。
+        work_err = None
+        for attempt in range(24):          # 24 * 0.5s ≈ 12s
+            try:
+                work()
+                work_err = None
+                break
+            except OSError as e:
+                # 1224 = 使用用户映射区域, 32 = 文件被另一进程占用
+                # winerror 与 errno 择一, 不同调用路径填的字段不一样
+                code = getattr(e, "winerror", None) or getattr(e, "errno", None)
+                if code not in (32, 1224):
+                    work_err = e
+                    break
+                work_err = e
+                if attempt == 0:
+                    self.q.put(("rlog", "游戏已退出, 等待文件解锁…"))
+                if gamemem.find_pid(PROC):
+                    self.q.put(("rlog", "游戏又被拉起来了, 取消%s" % why))
+                    self.q.put(("rdone", False))
+                    return
+                time.sleep(0.5)
+
+        if work_err is not None:
+            self.q.put(("rlog", "%s失败: %s" % (why, work_err)))
+            # 重试 12 秒还是写不进去, 说明不是延迟释放。列出还活着的进程,
+            # 免得只能对着一个错误码瞎猜。
+            try:
+                left = self._game_procs(os.path.dirname(exe))
+                if left:
+                    self.q.put(("rlog", "仍占用游戏目录的进程: %s"
+                                % ", ".join("%s(PID %d)" % (n, p)
+                                            for p, n in left)))
+                else:
+                    self.q.put(("rlog", "没有残留进程, 可能是安全软件在扫描锁定 "
+                                        "(可把游戏目录加进 Windows Defender 排除项)"))
+            except Exception:
+                pass
+            # 是我们把游戏关掉的, 得拉回去, 免得用户还得自己再点一次启动
+            if pid:
+                try:
+                    subprocess.Popen([exe], cwd=os.path.dirname(exe))
+                except Exception:
+                    pass
+            self.q.put(("rdone", False))
+            return
+
+        # 游戏本来就没开, 不用替用户启动
+        if not pid:
+            self.q.put(("rdone", True))
+            return
+
+        try:
+            subprocess.Popen([exe], cwd=os.path.dirname(exe))
         except Exception as e:
-            self.log("还原失败: %s" % e)
-            messagebox.showerror("失败", str(e))
+            self.q.put(("rlog", "%s完成, 但启动游戏失败: %s" % (why, e)))
+            self.q.put(("rdone", False))
+            return
+
+        # 先等进程真的出现
+        t0, up = time.time(), False
+        while time.time() - t0 < 30:
+            pid2 = gamemem.find_pid(PROC)
+            if pid2:
+                up = True
+                break
+            time.sleep(0.5)
+        if not up:
+            self.q.put(("rlog", "已拉起 BongoCat, 但 30 秒内没检测到进程, 请检查游戏"))
+            self.q.put(("rdone", False))
+            return
+
+        # 检测到进程就通知主线程重连, 不再等待窗口可见。
+        self.q.put(("rlog", "BongoCat 已重新启动, 检测到进程, 正在重新连接…"))
+        self.q.put(("rdone", True))
 
     def on_pause(self):
         if self.pause_on.get():
@@ -746,15 +1036,18 @@ class App(object):
         self.lb_addr.config(text="基址: —")
         self.core.addr = None
         self._enable(False)
+        self.retry = 0
         self.log("已连接 PID=%d, 正在自动定位…" % pid)
         self.root.after(400, self.do_locate)
 
-    def do_locate(self):
+    def do_locate(self, manual=True):
         if self.core.mem is None:
             messagebox.showwarning("提示", "请先连接进程")
             return
         if self.scanning:
             return
+        if manual:
+            self.retry = 0      # 用户主动点的, 重新给满重试次数
         self.scanning = True
         self.bt_scan.config(state="disabled", text="扫描中…")
         self.pb.config(value=0, maximum=100)
@@ -819,8 +1112,28 @@ class App(object):
                 self.scanning = False
                 self.bt_scan.config(state="normal", text="自动定位")
                 if not data:
+                    # 分两种情况, 别一律盲等:
+                    #  1) 游戏窗口都没了 —— 游戏挂了或被关了, 等也没用, 直接放弃
+                    #  2) 游戏还在跑, 只是数据没进内存 —— 退避重试兜底
+                    if not autoclick.find_hwnd(self.core.pid or 0):
+                        self.retry = 0
+                        self.log("游戏窗口不存在(游戏可能已退出), 放弃定位。"
+                                 "重新启动游戏后再点「自动定位」")
+                        continue
+                    if self.retry < 5:
+                        self.retry += 1
+                        wait = self.retry * 6
+                        self.log("游戏数据未就绪, %d 秒后自动重试 (%d/5)…"
+                                 % (wait, self.retry))
+                        self.root.after(wait * 1000,
+                                        lambda: self.do_locate(manual=False))
+                        # 必须 continue 而不是 return —— _pump 末尾靠
+                        # root.after(50, self._pump) 自我调度, return 会让
+                        # 整条链断掉, 之后界面再也不刷新。
+                        continue
                     self.log("未找到。确认游戏在运行, 且累计点击数 > 5000")
                 else:
+                    self.retry = 0
                     a, g, ach, sp = data[0]
                     self.core.addr = a
                     self.lb_addr.config(text="基址: 0x%X" % a)
@@ -830,9 +1143,24 @@ class App(object):
                     else:
                         self.log("找到 %d 个候选, 采用第一个: 0x%X" % (len(data), a))
 
+            elif kind == "rlog":
+                self.log(data)
+            elif kind == "rdone":
+                # 重启线程收工: 恢复按钮, 进程已起来就重新连接 + 自动定位
+                self.bt_patch.config(state="normal")
+                self.bt_unpatch.config(state="normal")
+                # DLL 可能在后台被改过, 重新判定补丁状态
+                self.refresh_patch_state()
+                if data:
+                    self.do_connect()
+                else:
+                    self.lb_proc.config(text="●  未连接", style="Proc.TLabel")
+
             elif kind == "shops":
                 if not data:
-                    self.log("未定位到 Shop 对象 (宝箱冷却功能不可用)")
+                    # 重试期间不重复刷屏, 等定位彻底失败时再报一次
+                    if self.retry == 0:
+                        self.log("未定位到 Shop 对象 (宝箱冷却功能不可用)")
                 else:
                     self._enable_shop(True)
                     for s in data:
@@ -912,10 +1240,65 @@ class App(object):
         self.root.after(50, self._pump)
 
 
+def _instance_mutex():
+    """创建会话内的单实例锁, 句柄必须保留到窗口关闭。"""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateMutexW(None, False, INSTANCE_MUTEX)
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    return kernel32, handle, error == 183    # ERROR_ALREADY_EXISTS
+
+
+def _activate_existing():
+    """重复启动时尽量唤回原窗口, 不创建新的 Tk 窗口。"""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    user32.IsIconic.restype = wintypes.BOOL
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    hwnd = user32.FindWindowW("TkTopLevel", APP_TITLE)
+    if hwnd:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)       # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+
+
 def main():
-    root = tk.Tk()
-    App(root)   
-    root.mainloop()
+    try:
+        kernel32, handle, exists = _instance_mutex()
+    except OSError as e:
+        # 锁创建失败时停止启动, 避免失去单实例保护。
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.MessageBoxW.argtypes = [wintypes.HWND, wintypes.LPCWSTR,
+                                      wintypes.LPCWSTR, wintypes.UINT]
+        user32.MessageBoxW.restype = ctypes.c_int
+        user32.MessageBoxW(None, "无法检查程序是否已运行: %s" % e, APP_TITLE, 0x10)
+        return
+    if exists:
+        kernel32.CloseHandle(handle)
+        _activate_existing()
+        return
+    try:
+        root = tk.Tk()
+        App(root)
+        root.mainloop()
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 if __name__ == "__main__":
