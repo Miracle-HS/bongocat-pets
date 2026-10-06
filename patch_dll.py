@@ -23,9 +23,10 @@ IL 字节数 12 -> 12, 方法长度不变, 所需 token (字段/方法) 都已�
 """
 import sys, os, struct, shutil, time, glob
 import dnfile
+import gameinfo, version
 
-DLL = (r"C:/Program Files (x86)/Steam/steamapps/common/BongoCat"
-       r"/BongoCat_Data/Managed/Assembly-CSharp.dll")
+# 游戏 DLL 路径不写死: 换台电脑 Steam 库位置就变了, 由 gameinfo 运行时定位。
+# 需要路径时调 gameinfo.find_dll() / find_dll_or_raise(), 不要缓存到常量。
 
 
 def game_running():
@@ -57,7 +58,7 @@ def compute(path=None):
       G1 (2026-09 及更早): 原版  .../ldc.i4.1/callvirt GameObject::SetActive
                         补丁  .../callvirt Buy/nop   (旧版工具写的形态)
     """
-    path = path or DLL
+    path = path or gameinfo.find_dll_or_raise()
     pe = dnfile.dnPE(path)
     raw = open(path, "rb").read()
 
@@ -153,34 +154,48 @@ def compute(path=None):
                        "游戏可能又更新了, 放弃" % code_len)
 
 
-def newest_backup():
-    b = sorted(glob.glob(DLL + ".bak-*"))
+def newest_backup(path=None):
+    dll = path or gameinfo.find_dll()
+    if not dll:
+        return None
+    b = sorted(glob.glob(dll + ".bak-*"))
     return b[-1] if b else None
 
 
 def do_status():
-    off, old, new, state = compute()
-    print("目标文件 : %s" % DLL)
+    dll = gameinfo.find_dll()
+    if not dll:
+        print("目标文件 : (未找到游戏目录)")
+        for t in gameinfo.search_trail():
+            print("    尝试: %s" % t)
+        print("[!] 请在 GUI 点「选择游戏目录」, 或设环境变量 BONGOCAT_DIR 指向游戏根目录")
+        return None
+    off, old, new, state = compute(dll)
+    print("目标文件 : %s" % dll)
     print("补丁位置 : 文件偏移 0x%X" % off)
     print("原  字节 : %s" % old.hex())
     print("新  字节 : %s" % new.hex())
     print("当前状态 : %s" % state)
-    b = newest_backup()
+    b = newest_backup(dll)
     print("最近备份 : %s" % (os.path.basename(b) if b else "无"))
+    build, updated = gameinfo.steam_build(dll)
+    if build or updated:
+        print("游戏版本 : build %s%s" % (build or "?", "  (%s 更新)" % updated if updated else ""))
     pid = game_running()
     print("游戏进程 : %s" % ("运行中 PID=%d (补丁在下次启动游戏后生效)" % pid if pid else "未运行"))
     return state
 
 
-def write_bytes(off, data, make_backup=True):
+def write_bytes(off, data, make_backup=True, path=None):
+    dll = path or gameinfo.find_dll_or_raise()
     if make_backup:
-        bak = DLL + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
-        shutil.copy2(DLL, bak)
+        bak = dll + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(dll, bak)
         print("已备份 -> %s" % os.path.basename(bak))
-    with open(DLL, "r+b") as f:
+    with open(dll, "r+b") as f:
         f.seek(off)
         f.write(data)
-    with open(DLL, "rb") as f:
+    with open(dll, "rb") as f:
         f.seek(off)
         chk = f.read(len(data))
     ok = chk == data
@@ -207,11 +222,20 @@ def wait_for_exit(limit=900):
 
 def main():
     args = sys.argv[1:]
+    print("BongoCat 自动开箱补丁器 v%s  (适配游戏 %s)"
+          % (version.__version__, " / ".join(version.ADAPTED)))
     if "--status" in args:
         do_status()
         return
     if "--restore" in args:
-        b = newest_backup()
+        dll = gameinfo.find_dll()
+        if not dll:
+            print("[!] 未找到 BongoCat 游戏目录, 无法还原。")
+            for t in gameinfo.search_trail():
+                print("    尝试: %s" % t)
+            print("    可设环境变量 BONGOCAT_DIR 指向游戏根目录, 或先运行 GUI 选目录")
+            return
+        b = newest_backup(dll)
         if not b:
             print("[!] 没有找到备份文件")
             return
@@ -219,7 +243,7 @@ def main():
             if not wait_for_exit():
                 return
         try:
-            shutil.copy2(b, DLL)
+            shutil.copy2(b, dll)
         except PermissionError:
             print("[!] DLL 被进程锁住, 请关闭 BongoCat 再还原 (--restore --wait 可等待)")
             return
@@ -227,7 +251,13 @@ def main():
         do_status()
         return
 
-    off, old, new, state = compute()
+    try:
+        off, old, new, state = compute()
+    except gameinfo.GameNotFound as e:
+        print("[!] %s" % e)
+        for t in gameinfo.search_trail():
+            print("    尝试: %s" % t)
+        return
     print("补丁位置 : 文件偏移 0x%X" % off)
     print("原  字节 : %s" % old.hex())
     print("新  字节 : %s" % new.hex())

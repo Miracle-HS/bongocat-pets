@@ -10,11 +10,12 @@ BongoCat 点击数(Pets) 图形工具
 """
 import os, sys, struct, bisect, threading, queue, time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gamemem import Mem, find_pid
 import autoclick
+import gameinfo, version
 
 OFF_READY = 0x0D      # ChestIsReady   
 OFF_OPENING = 0x0F    # _openingChest
@@ -357,6 +358,10 @@ class App(object):
         ttk.Label(head, text=title, style="Head.TLabel").pack(side="left")
         ttk.Label(head, text="定位 · 改数值 · 宝箱管理", style="Sub.TLabel").pack(
             side="left", padx=(10, 0), pady=(7, 0))
+        ttk.Label(head, text="v%s" % version.__version__, style="Sub.TLabel").pack(
+            side="right", pady=(7, 0))
+        ttk.Label(head, text="适配游戏 %s" % " / ".join(version.ADAPTED),
+                  style="Sub.TLabel").pack(side="right", padx=(0, 8), pady=(7, 0))
 
         # ============ 连接 · 定位 · 数值 ============
         f1 = ttk.LabelFrame(r, text=" ①  连接 · 定位 · 数值 ",
@@ -482,6 +487,13 @@ class App(object):
         ttk.Button(rr, text="打补丁", command=self.do_patch).pack(side="left")
         ttk.Button(rr, text="还原", style="Warn.TButton",
                    command=self.do_unpatch).pack(side="left", padx=(8, 0))
+        rv = ttk.Frame(c2, style="Card.TFrame")
+        rv.pack(fill="x", pady=(6, 0))
+        ttk.Label(rv, text="游戏版本", width=8, style="Muted.TLabel").pack(side="left")
+        self.v_game = tk.StringVar(value="检测中…")
+        ttk.Label(rv, textvariable=self.v_game, style="Key.TLabel").pack(side="left")
+        ttk.Button(rv, text="选择游戏目录",
+                   command=self.do_choose_dir).pack(side="right")
         rr = ttk.Frame(c2, style="Card.TFrame")
         rr.pack(fill="x", pady=(6, 0))
         ttk.Label(rr, text="已开箱", width=8, style="Muted.TLabel").pack(side="left")
@@ -556,19 +568,60 @@ class App(object):
         self.log("开箱计数已清零")
 
     def refresh_patch_state(self):
-        """读 Assembly-CSharp.dll 判断是原版还是已打补丁"""
+        """定位游戏 DLL, 判断是原版还是已打补丁"""
+        dll = gameinfo.find_dll()
+        if not dll:
+            self.patch_state = None
+            self.v_patch.set("未找到游戏")
+            self.lb_patch.config(foreground=AMBER)
+            self.v_game.set("—")
+            self.log("未找到 BongoCat 游戏目录。请点「选择游戏目录」指定, 或确认游戏已安装")
+            return None
         try:
-            import patch_dll
-            off, old, new, state = patch_dll.compute()
-            self.patch_state = state
-            self.v_patch.set(state + ("  (偏移 0x%X)" % off))
-            self.lb_patch.config(foreground=GREEN if state.startswith("已打补丁") else TEXT)
-            return state
+            import patch_dll          # 放在 try 里: 没装 dnfile 时不该让界面崩掉
+            off, old, new, state = patch_dll.compute(dll)
         except Exception as e:
             self.patch_state = None
             self.v_patch.set("无法读取: %s" % str(e)[:22])
             self.lb_patch.config(foreground=RED)
+            self.v_game.set("—")
             return None
+        self.patch_state = state
+        self.v_patch.set(state + ("  (偏移 0x%X)" % off))
+        self.lb_patch.config(foreground=GREEN if state.startswith("已打补丁") else TEXT)
+        self._set_game_version(dll, state)
+        return state
+
+    def _set_game_version(self, dll, state):
+        """拼「代次 · build · 更新日期」, 缺哪项省哪项 (非 Steam 安装只剩代次)"""
+        parts = []
+        gen = gameinfo.gen_from_state(state)
+        if gen:
+            parts.append(gen)
+        build, updated = gameinfo.steam_build(dll)
+        if build:
+            parts.append("build %s" % build)
+        if updated:
+            parts.append("%s 更新" % updated)
+        self.v_game.set("  ·  ".join(parts) or "—")
+
+    def do_choose_dir(self):
+        """手动指定游戏目录 (自动定位全落空时的兜底)"""
+        d = filedialog.askdirectory(title="选择 BongoCat 安装目录 (含 BongoCat.exe)")
+        if not d:
+            return
+        d = os.path.normpath(d)
+        if not gameinfo.dll_from_dir(d):
+            messagebox.showwarning(
+                "目录不对",
+                "该目录下没找到:\nBongoCat_Data\\Managed\\Assembly-CSharp.dll\n\n"
+                "请选择包含 BongoCat.exe 的游戏安装目录 (通常名为 BongoCat)。")
+            return
+        self.cfg["game_dir"] = d          # 读-改-写, 不覆盖已存的开箱计数
+        autoclick.save_cfg(self.cfg)
+        gameinfo.find_dll(refresh=True)
+        self.log("游戏目录已设为: %s" % d)
+        self.refresh_patch_state()
 
     def do_patch(self):
         import patch_dll
@@ -577,7 +630,9 @@ class App(object):
             messagebox.showinfo("提示", "已经是补丁状态了")
             return
         if st is None:
-            messagebox.showwarning("提示", "读不到 DLL, 看日志")
+            messagebox.showwarning(
+                "提示", "没能读取游戏 DLL。\n若上面显示「未找到游戏」, "
+                        "请点「选择游戏目录」指定游戏安装位置。")
             return
         running = patch_dll.game_running()
         try:
@@ -600,14 +655,19 @@ class App(object):
 
     def do_unpatch(self):
         import patch_dll
-        b = patch_dll.newest_backup()
+        try:
+            dll = gameinfo.find_dll_or_raise()
+        except gameinfo.GameNotFound:
+            messagebox.showwarning("提示", "未找到 BongoCat 游戏目录, 请先点「选择游戏目录」。")
+            return
+        b = patch_dll.newest_backup(dll)
         if not b:
             messagebox.showwarning("提示", "没找到备份文件")
             return
         try:
             import shutil, os
             try:
-                shutil.copy2(b, patch_dll.DLL)
+                shutil.copy2(b, dll)
             except PermissionError:
                 messagebox.showwarning("需要先关闭游戏", "DLL 被进程锁住了, 请关闭 BongoCat 后再还原。")
                 return

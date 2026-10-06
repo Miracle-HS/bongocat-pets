@@ -2,6 +2,8 @@
 
 给 Steam 桌面宠物 [BongoCat](https://store.steampowered.com/app/3419430/Bongo_Cat/) 的单机辅助脚本：修改点击数、加速宝箱冷却、自动开箱。数据走 Steam 本地统计，改动安全。
 
+当前版本 **v1.0.0**，适配游戏 **2026-09 / 2026-10** 两代。界面标题栏显示工具版本与适配代次，「自动开箱」区里的「游戏版本」显示实际检测到的 Steam build 与更新时间。
+
 ## 环境要求
 
 - Windows + Python ≥ 3.10（tkinter 随安装包自带，无需另装）
@@ -53,11 +55,14 @@ python pets_tool.py hold  <addr> [v] 持续锁定累计花费 (Ctrl+C 停)
 |---|---|
 | `gui.py` | 主程序（tkinter 深色界面）：连接 → 定位 → 改数值 / 冷却 / 打补丁 |
 | `gamemem.py` | 底层库：ctypes 内存扫描、读写、进程查找（无第三方依赖） |
-| `autoclick.py` | DPI 感知点击探测 + `config.json` 读写（开箱计数存这里） |
+| `gameinfo.py` | 游戏目录定位（Steam 注册表 / 库清单 / 运行中进程）+ 游戏版本号读取 |
+| `autoclick.py` | DPI 感知点击探测 + `config.json` 读写（开箱计数、游戏目录存这里） |
 | `patch_dll.py` | 等长 IL 补丁器：双代模式自适应，匹配不唯一就拒写 |
 | `pets_tool.py` | 点击数定位/修改的命令行版（与 GUI 卡片①同源） |
+| `version.py` | 工具版本号与适配的游戏代次 |
 | `assets/` | 图标与本文档流程图 |
 
+> 游戏 DLL 路径不写死：工具按 Steam 注册表、库清单（`libraryfolders.vdf`）、运行中的游戏进程、常见安装路径依次查找；都没命中时可在界面点「选择游戏目录」手动指定（选含 `BongoCat.exe` 的那层），路径会记进 `config.json` 下次直接用。也可设环境变量 `BONGOCAT_DIR` 指向游戏根目录。
 > 当前游戏 2026-10 代：`Shop`/`Pets` 字段布局与内存定位逻辑全部通用；补丁点由 `patch_dll.py` 动态解析 token 适配。
 
 ## 问题排查
@@ -65,6 +70,8 @@ python pets_tool.py hold  <addr> [v] 持续锁定累计花费 (Ctrl+C 停)
 - **数字不刷新 / 显示"—"**：基址失效（多半刚重启过游戏），点「自动定位」重扫。
 - **补丁状态显示"原版"、自动开箱突然不干活**：Steam 更新覆盖了 DLL，`--apply` 重打一次即可。
 - **`--apply` 报"找不到原版字节"**：游戏代码又改版了，补丁脚本按设计拒绝写入（不会写坏文件），需要重新做一轮 IL 差分维护。
+- **显示"未找到游戏"**：自动查找全部落空（非 Steam 安装、Steam 装在非常规位置、游戏没运行等）。点「选择游戏目录」手动指定，或设环境变量 `BONGOCAT_DIR` 指向游戏根目录。`python patch_dll.py --status` 会打印它尝试过的所有路径，便于排查。
+- **「游戏版本」栏只显示代次、没有 build 号**：说明游戏不是通过 Steam 安装的，工具读不到 Steam 清单，属于正常降级。
 - **提示权限不足**：游戏装在 `Program Files (x86)`，个别环境需要以管理员身份运行终端再执行写补丁命令。
 
 ## 开源协议
