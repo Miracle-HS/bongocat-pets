@@ -6,3 +6,7 @@
 bongocat-pets.code-workspace
 __pycache__/
 config.json
+*.exe
+build/
+dist/
+*.spec
